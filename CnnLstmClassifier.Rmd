@@ -1,0 +1,258 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r Encode training data}
+# Load required libraries
+library(readr)
+
+# Read the file
+file <- read_lines("train.txt") # Replace with the path of your file
+
+# Create a list of possible inputs and outputs for one-hot encoding
+inputs <- c('A','B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y')
+outputs <- c('C', 'H', 'E')
+
+# Initialize an empty list to store rows
+input_list <- list()
+output_list <- list()
+
+j = 1
+
+# Process the file
+for (i in seq(1, length(file), by = 4)) {
+  
+  # Get the input and output strings
+  input_string <- file[i+1]
+  output_string <- file[i+2]
+  
+  # Check if lengths of the input and output strings are the same
+  if(nchar(input_string) != nchar(output_string)){
+    next
+  }
+  
+  # Orthogonal encode the input and output for each character
+  input_encoded <- t(sapply(strsplit(input_string, "")[[1]], function(x) as.integer(inputs == x)))
+  output_encoded <- t(sapply(strsplit(output_string, "")[[1]], function(x) as.integer(outputs == x)))
+  
+  # Add the encoding to the respective lists
+  input_list[[j]] <- input_encoded
+  output_list[[j]] <- output_encoded
+    
+  j=j+1
+  
+}
+```
+
+```{r Generate sliding windows}
+library(abind)
+
+# Define window size
+window_size <- 15
+half_window <- window_size %/% 2
+
+# Calculate total number of windows
+total_windows <- sum(sapply(input_list, function(x) nrow(x)))
+
+# Initialize arrays
+x_trainArray <- array(0, dim = c(total_windows, window_size, length(inputs)))
+y_trainArray <- array(0, dim = c(total_windows, length(outputs)))
+
+# Fill in the data
+counter <- 1
+for (i in 1:length(input_list)) {
+  padding_size <- half_window
+  dims <- dim(input_list[[i]])
+  padding <- array(0, dim = c(padding_size, dims[2]))
+  #Add padding for beggining and ending of the sequence
+  padded_input <- abind(padding, input_list[[i]], padding, along = 1)
+
+  # Generate sliding windows
+  for (j in (half_window + 1):(nrow(padded_input) - half_window)) {
+    x_trainArray[counter, , ] <- padded_input[(j - half_window):(j + half_window), ]
+    y_trainArray[counter, ] <- output_list[[i]][j-half_window, ]
+    counter <- counter + 1
+  }
+}
+
+x_train = x_trainArray
+y_train = y_trainArray
+```
+
+```{r LSTM training}
+library(keras)
+use_condaenv("r-reticulate")
+
+# Model parameters
+lstm_units <- 64
+
+# Initialize the model
+lstm_model <- keras_model_sequential()
+
+# Add layers to the model
+lstm_model %>%
+  layer_lstm(units = lstm_units, input_shape = c(window_size,length(inputs))) %>%
+  layer_dense(units = 3, activation = 'softmax')
+
+# Compile the model
+lstm_model %>% compile(
+  optimizer = 'adam',
+  loss = 'categorical_crossentropy',
+  metrics = c('accuracy')
+)
+
+# Train the model
+history <- lstm_model %>% fit(
+  x_train, y_train,
+  epochs = 8,
+  batch_size = 128,
+  validation_split = 0.2
+)
+
+save_model_hdf5(lstm_model, "lstm_model.h5")
+```
+
+```{r CNN training}
+library(keras)
+
+use_condaenv("r-reticulate")
+
+# Initialize the model
+cnn_model <- keras_model_sequential()
+
+# Add layers to the model
+cnn_model %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3,3), input_shape = c(window_size,length(inputs),1)) %>%
+  layer_flatten() %>%
+  layer_dense(units = 3, activation = 'softmax')
+
+# Compile the model
+cnn_model %>% compile(
+  optimizer = 'adam',
+  loss = 'categorical_crossentropy',
+  metrics = c('accuracy')
+)
+
+# Train the model
+history <- cnn_model %>% fit(
+  x_train, y_train,
+  epochs = 8,
+  batch_size = 64,
+  validation_split = 0.2
+)
+
+save_model_hdf5(cnn_model, "cnn_model.h5")
+```
+
+
+```{r Prediction}
+
+# Load required libraries
+library(readr)
+library(keras)
+library(abind)
+
+use_condaenv("r-reticulate")
+
+# Load trained models
+lstm_model <- load_model_hdf5("lstm_model.h5")
+cnn_model <- load_model_hdf5("cnn_model.h5")
+
+# Read the file
+validate_file <- read_lines("validate.txt") # Replace with the path of your file
+
+# Create a list of possible inputs and outputs for one-hot encoding
+inputs <- c('A','B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y')
+outputs <- c('C','H','E')
+
+# Initialize an empty list to store rows
+input_list <- list()
+output_list <- list()
+
+j = 1
+
+# Process the file
+for (i in seq(1, length(validate_file), by = 4)) {
+  
+  # Get the input and output strings
+  input_string <- validate_file[i+1]
+  output_string <- validate_file[i+2]
+  
+  # Check if lengths of the input and output strings are the same
+  if(nchar(input_string) != nchar(output_string)){
+    next
+  }
+  
+  # One-hot encode the input and output for each character
+  input_encoded <- t(sapply(strsplit(input_string, "")[[1]], function(x) as.integer(inputs == x)))
+  output_encoded <- t(sapply(strsplit(output_string, "")[[1]], function(x) as.integer(outputs == x)))
+  
+  # Add the encoding to the respective lists
+  input_list[[j]] <- input_encoded
+  output_list[[j]] <- output_encoded
+
+  j=j+1
+}
+
+# Initialize arrays
+x_validate <- array(0, dim = c(total_windows, window_size, length(inputs)))
+y_validate <- array(0, dim = c(total_windows, length(outputs)))
+
+# Fill in the data
+counter <- 1
+for (i in 1:length(input_list)) {
+  padding_size <- half_window
+  dims <- dim(input_list[[i]])
+  padding <- array(0, dim = c(padding_size, dims[2]))
+
+  padded_input <- abind(padding, input_list[[i]], padding, along = 1)
+
+  # Generate sliding windows
+  for (j in (half_window + 1):(nrow(padded_input) - half_window)) {
+    x_validate[counter, , ] <- padded_input[(j - half_window):(j + half_window), ]
+    y_validate[counter, ] <- output_list[[i]][j-half_window, ]
+    counter <- counter + 1
+  }
+}
+
+pred_combined <- function(model1, model2, a, b, dat)
+{
+    if(a+b!=1)
+      stop("Parameters a + b should be equal 1!")
+    prediction1 <- predict(model1, dat)
+    prediction2 <- predict(model2, dat)
+    (a*prediction1)+(b*prediction2)/2
+}
+
+# Predict values
+predictions <- pred_combined(cnn_model, lstm_model, 0.58, 0.42, x_validate)
+
+# Convert predictions to labels
+predicted_labels <- max.col(predictions) - 1  # Convert from orthogonal encoding to labels
+true_labels <- max.col(y_validate) - 1
+
+# Creating a lookup table
+label_map <- c("C", "H", "E")
+
+# Mapping labels to values using the lookup table
+predicted_labels <- label_map[predicted_labels + 1]
+true_labels <- label_map[true_labels + 1]
+
+# Convert labels chars to string
+predicted_labels_string <- paste(predicted_labels, collapse = "")
+true_labels_string <- paste(true_labels, collapse = "")
+
+# Write labels to file
+writeLines(predicted_labels_string, "predict.txt")
+writeLines(true_labels_string, "true.txt")
+
+# Convert predictions to a data frame
+predictions_df <- as.data.frame(predictions)
+
+# Set the file path and name for saving the predictions
+output_file <- "predictions.csv"
+
+# Write predictions to a CSV file
+write.csv(predictions_df, file = output_file, row.names = FALSE)
+```
